@@ -12,13 +12,22 @@ export function Search({ workspace, onClose, onSelect }: { workspace: Workspace;
     ...workspace.snippets.map((item) => ({ kind: 'snippet' as const, item })),
     ...workspace.notes.map((item) => ({ kind: 'note' as const, item })),
   ];
-  const query = search.trim().toLowerCase().split(/\s+/);
-  const results = updatedFirst(items.map((value) => ({ ...value, updatedAt: value.item.updatedAt }))).filter((entry) => {
-    const text = entry.kind === 'project' ? [entry.item.description, entry.item.path, entry.item.status, ...entry.item.tags] :
+  const query = search.trim().toLowerCase();
+  const words = query.split(/\s+/);
+  const ranked = items.map((entry) => {
+    const title = entry.item.title.toLowerCase();
+    const details = entry.kind === 'project' ? [entry.item.description, entry.item.path, entry.item.status, ...entry.item.tags] :
       entry.kind === 'snippet' ? [entry.item.category, entry.item.content] :
         [entry.item.topic, entry.item.content, workspace.projects.find((project) => project.id === entry.item.projectId)?.title];
-    return query.every((word) => [entry.item.title, ...text].join(' ').toLowerCase().includes(word));
+    const text = [title, ...details].join(' ').toLowerCase();
+    if (words.some((word) => !text.includes(word))) return { entry, rank: -1, updatedAt: entry.item.updatedAt };
+    // Titles take priority over matches in note text or linked project metadata.
+    const rank = title === query ? 3 : title.startsWith(query) ? 2 : words.every((word) => title.includes(word)) ? 1 : 0;
+    return { entry, rank, updatedAt: entry.item.updatedAt };
   });
+  const results = updatedFirst(ranked.filter(({ rank }) => rank >= 0))
+    .sort((a, b) => b.rank - a.rank)
+    .map(({ entry }) => entry);
   const active = Math.min(focused, results.length - 1);
   const icons = { project: Folder, snippet: Terminal, note: FileText };
 
