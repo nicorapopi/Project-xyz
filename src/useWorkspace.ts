@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Workspace } from './model';
-import { browserKey, desktop, readWorkspace, saveWorkspace, StorageError, type Snapshot } from './storage';
+import { browserKey, desktop, enableWorkspaceEncryption, readWorkspace, saveWorkspace, StorageError, type Snapshot } from './storage';
 
 export type Mutation = (workspace: Workspace) => Workspace;
 
 interface Pending {
   apply: Mutation;
+  persist: (workspace: Workspace, previous: Snapshot) => Promise<Snapshot>;
   resolve: () => void;
   reject: (reason: unknown) => void;
 }
@@ -13,9 +14,15 @@ interface Pending {
 type LoadState =
   | { phase: 'loading' }
   | { phase: 'failure'; message: string }
-  | { phase: 'ready'; workspace: Workspace; pending: number };
+  | { phase: 'ready'; workspace: Workspace; pending: number; encrypted: boolean };
 
 function loadMessage(error: unknown) {
+  if (error instanceof StorageError && error.code === 'key-unavailable') {
+    return 'The encryption key is unavailable. Use the original OS account and unlock its credential store, then try again.';
+  }
+  if (error instanceof StorageError && error.code === 'recovery-required') {
+    return 'An encrypted backup was found. Keep all copies and restore a known-good encrypted backup before retrying.';
+  }
   if (error instanceof StorageError && error.code === 'corrupt') {
     return 'The saved workspace could not be read. Keep the original files and restore a known-good copy before retrying.';
   }
@@ -29,6 +36,7 @@ export function mutationMessage(error: unknown, fallback: string) {
   if (error instanceof StorageError && error.code === 'conflict') return 'The workspace changed in another window. Review the latest data before retrying.';
   if (error instanceof StorageError && error.code === 'too-large') return 'This change would exceed the workspace size limit.';
   if (error instanceof StorageError && error.code === 'invalid') return 'Check the changed fields and linked project, then try again.';
+  if (error instanceof StorageError && (error.code === 'key-unavailable' || error.code === 'recovery-required')) return loadMessage(error);
   return fallback;
 }
 
@@ -45,6 +53,7 @@ export function useWorkspace() {
       phase: 'ready',
       workspace: queue.current.reduce((data, operation) => operation.apply(data), saved.current.workspace),
       pending: queue.current.length,
+      encrypted: saved.current.encrypted,
     });
   }, []);
 
@@ -92,8 +101,7 @@ export function useWorkspace() {
         const previous = saved.current;
         try {
           const workspace = operation.apply(previous.workspace);
-          const revision = await saveWorkspace(workspace, previous.revision);
-          saved.current = { revision, workspace };
+          saved.current = await operation.persist(workspace, previous);
           queue.current.shift();
           publish();
           operation.resolve();
@@ -116,12 +124,24 @@ export function useWorkspace() {
     }
   }, [publish]);
 
-  const mutate = useCallback((apply: Mutation) => new Promise<void>((resolve, reject) => {
+  const enqueue = useCallback((apply: Mutation, persist: Pending['persist']) => new Promise<void>((resolve, reject) => {
     if (!saved.current) { reject(new StorageError('blocked')); return; }
-    queue.current.push({ apply, resolve, reject });
+    queue.current.push({ apply, persist, resolve, reject });
     publish();
     void drain();
   }), [drain, publish]);
 
-  return { state, mutate, reload };
+  const mutate = (apply: Mutation) => enqueue(apply, async (workspace, previous) => ({
+    revision: await saveWorkspace(workspace, previous.revision),
+    workspace,
+    encrypted: previous.encrypted,
+  }));
+
+  const enableEncryption = () => enqueue((workspace) => workspace, async (workspace, previous) => ({
+    revision: await enableWorkspaceEncryption(workspace, previous.revision),
+    workspace,
+    encrypted: true,
+  }));
+
+  return { state, mutate, reload, enableEncryption };
 }

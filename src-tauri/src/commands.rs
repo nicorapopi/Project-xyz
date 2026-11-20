@@ -1,6 +1,6 @@
 use crate::{
     paths::valid_stored_path,
-    workspace::{Snapshot, StoreError, Workspace, WorkspaceStore},
+    workspace::{StoreError, Workspace, WorkspaceRead, WorkspaceStore},
 };
 use std::{
     path::{Path, PathBuf},
@@ -24,8 +24,20 @@ async fn with_store<T: Send + 'static>(
 }
 
 #[tauri::command]
-pub async fn read_workspace(app: AppHandle) -> Result<Option<Snapshot>, StoreError> {
-    with_store(app, WorkspaceStore::read).await
+pub async fn read_workspace(app: AppHandle) -> Result<WorkspaceRead, StoreError> {
+    with_store(app, WorkspaceStore::read_with_mode).await
+}
+
+#[tauri::command]
+pub async fn enable_workspace_encryption(
+    app: AppHandle,
+    initial_workspace: Workspace,
+    expected_revision: u64,
+) -> Result<u64, StoreError> {
+    with_store(app, move |store| {
+        store.enable_encryption(initial_workspace, expected_revision)
+    })
+    .await
 }
 
 #[tauri::command]

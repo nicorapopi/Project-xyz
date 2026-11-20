@@ -10,10 +10,11 @@ export const desktop = isTauri();
 export interface Snapshot {
   revision: number;
   workspace: Workspace;
+  encrypted: boolean;
 }
 
 export class StorageError extends Error {
-  constructor(readonly code: 'conflict' | 'corrupt' | 'blocked' | 'too-large' | 'invalid') {
+  constructor(readonly code: 'conflict' | 'corrupt' | 'blocked' | 'too-large' | 'invalid' | 'key-unavailable' | 'recovery-required') {
     super(code);
   }
 }
@@ -28,7 +29,7 @@ function parseJson(raw: string): unknown {
   catch { throw new StorageError('corrupt'); }
 }
 
-function parseSnapshot(raw: unknown): Snapshot {
+function parseSnapshot(raw: unknown): Omit<Snapshot, 'encrypted'> {
   const parsed = snapshotSchema.safeParse(raw);
   if (!parsed.success) throw new StorageError('corrupt');
   return parsed.data;
@@ -38,6 +39,7 @@ async function native<T>(command: string, args?: Record<string, unknown>) {
   try { return await invoke<T>(command, args); }
   catch (error: unknown) {
     if (error === 'conflict' || error === 'corrupt' || error === 'too-large' || error === 'invalid') throw new StorageError(error);
+    if (error === 'key-unavailable' || error === 'recovery-required') throw new StorageError(error);
     throw new StorageError('blocked');
   }
 }
@@ -48,21 +50,29 @@ function withBrowserLock<T>(operation: () => T): Promise<T> {
 
 function loadBrowser(): Snapshot {
   const current = localStorage.getItem(browserKey);
-  if (current !== null) return parseSnapshot(parseJson(current));
+  if (current !== null) return { ...parseSnapshot(parseJson(current)), encrypted: false };
   const legacy = localStorage.getItem(browserLegacyKey);
-  if (legacy === null) return { revision: 0, workspace: initialWorkspace };
+  if (legacy === null) return { revision: 0, workspace: initialWorkspace, encrypted: false };
   const data = workspaceSchema.safeParse(parseJson(legacy));
   if (!data.success) throw new StorageError('corrupt');
   // The legacy key is the exact pre-migration snapshot and remains untouched.
   const migrated = { version: 2, revision: 1, workspace: data.data };
   localStorage.setItem(browserKey, JSON.stringify(migrated));
-  return migrated;
+  return { ...migrated, encrypted: false };
 }
 
 export async function readWorkspace(): Promise<Snapshot> {
   if (!desktop) return withBrowserLock(loadBrowser);
   const raw = await native<unknown>('read_workspace');
-  return raw === null ? { revision: 0, workspace: initialWorkspace } : parseSnapshot(raw);
+  if (!raw || typeof raw !== 'object' || !('encrypted' in raw) || typeof raw.encrypted !== 'boolean' || !('snapshot' in raw)) {
+    throw new StorageError('corrupt');
+  }
+  if (raw.snapshot === null && !raw.encrypted) return { revision: 0, workspace: initialWorkspace, encrypted: false };
+  return { ...parseSnapshot(raw.snapshot), encrypted: raw.encrypted };
+}
+
+export function enableWorkspaceEncryption(initialWorkspace: Workspace, expectedRevision: number) {
+  return native<number>('enable_workspace_encryption', { initialWorkspace, expectedRevision });
 }
 
 export async function saveWorkspace(workspace: Workspace, expectedRevision: number): Promise<number> {
