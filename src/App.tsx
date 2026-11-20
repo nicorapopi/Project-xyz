@@ -1,18 +1,19 @@
 import { useEffect, useRef, useState } from 'react';
 import { Header, Sidebar, Toast, ToastContext } from './components';
 import { ConfirmDelete, Editor, NewItem, type EditorValue } from './Editor';
+import { ConfirmEncryption, EncryptionSettings } from './EncryptionSettings';
 import { Overview } from './Overview';
 import { Search } from './Search';
 import { NotesView, ProjectDetails, ProjectsView, SettingsView, SnippetsView } from './Views';
 import { WorkspaceBoundary, WorkspaceFailure, WorkspaceSkeleton } from './WorkspaceState';
 import type { EditorState, Kind, Note, Project, Theme, View } from './model';
 import { ImportError, MAX_IMPORT_BYTES, parseImport } from './schema';
-import { copyText, openWebLink, revealFolder, StorageError } from './storage';
+import { copyText, desktop, openWebLink, revealFolder, StorageError } from './storage';
 import { mutationMessage, useWorkspace } from './useWorkspace';
 import { deleteEntry, importEntries, saveEntry } from './workspaceActions';
 
 type Overlay =
-  | { type: 'new' | 'search' }
+  | { type: 'new' | 'search' | 'encrypt' }
   | { type: 'editor'; value: EditorState }
   | { type: 'project'; projectId: string }
   | { type: 'delete'; value: EditorValue };
@@ -25,7 +26,7 @@ function focusMenu() {
 }
 
 export function App() {
-  const { state, mutate, reload } = useWorkspace();
+  const { state, mutate, reload, enableEncryption } = useWorkspace();
   const workspace = state.phase === 'ready' ? state.workspace : null;
   const ready = state.phase === 'ready';
   const [view, setView] = useState<View>('Overview');
@@ -162,13 +163,22 @@ export function App() {
             {view === 'Notes' && <NotesView workspace={workspace} noteId={noteId} onSelect={(note) => setNoteId(note.id)} onAdd={() => addItem('note')}
               onLink={(url) => void openWebLink(url).catch(() => notify('Could not open this link', true))}
               onEdit={(item) => editItem({ kind: 'note', item })} onDelete={(item) => askDelete({ kind: 'note', item })} />}
-            {view === 'Settings' && <SettingsView theme={workspace.theme} onTheme={changeTheme} onImport={importFile} />}
+            {view === 'Settings' && <>
+              <SettingsView theme={workspace.theme} onTheme={changeTheme} onImport={importFile} />
+              {desktop && state.phase === 'ready' && <EncryptionSettings encrypted={state.encrypted} busy={state.pending > 0}
+                onEnable={() => setOverlay({ type: 'encrypt' })} />}
+            </>}
           </> : state.phase === 'failure' ? <WorkspaceFailure message={state.message} onRetry={() => void reload()} /> : <WorkspaceSkeleton />}
           </WorkspaceBoundary>
         </div>
       </main>
     </div>
     {workspace && overlay?.type === 'new' && <NewItem onChoose={addItem} onClose={close} />}
+    {workspace && overlay?.type === 'encrypt' && <ConfirmEncryption onClose={close} onEnable={async () => {
+      await enableEncryption();
+      close();
+      notify('Workspace encryption enabled');
+    }} />}
     {workspace && overlay?.type === 'search' && <Search workspace={workspace} onClose={close} onSelect={selectSearch} onNavigate={navigate} onCreate={addItem} />}
     {workspace && overlay?.type === 'editor' && <Editor state={overlay.value} projects={workspace.projects} onClose={close} onSave={saveItem} />}
     {overlay?.type === 'delete' && <ConfirmDelete value={overlay.value} onClose={close} onDelete={() => deleteItem(overlay.value)} />}
