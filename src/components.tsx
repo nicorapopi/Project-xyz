@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useRef, type ReactNode } from 'react';
-import { Activity, ArrowRight, AudioLines, Boxes, Braces, Check, ChevronDown, CodeXml, Command, Copy, FileText, Folder, FolderOpen, Layers3, LayoutGrid, Menu, Moon, Plus, Search, Settings2, Sun, Terminal, X, type LucideIcon } from 'lucide-react';
+import { ArrowRight, AudioLines, Boxes, Braces, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, CodeXml, Command, Copy, FileText, Folder, FolderOpen, Layers3, LayoutGrid, Menu, Moon, Plus, Search, Settings2, Sun, Terminal, X, type LucideIcon } from 'lucide-react';
 import { statusClass, type Status, type View, type Workspace } from './model';
+import { arrowFocus } from './useList';
 
 export const navigation: { label: View; icon: LucideIcon }[] = [
   { label: 'Overview', icon: LayoutGrid },
@@ -10,32 +11,34 @@ export const navigation: { label: View; icon: LucideIcon }[] = [
   { label: 'Settings', icon: Settings2 },
 ];
 
-export function Sidebar({ view, go, workspace, expanded }: {
-  view: View; go: (view: View) => void; workspace: Workspace | null; expanded: boolean;
+export function Sidebar({ view, go, workspace, expanded, saving }: {
+  view: View; go: (view: View) => void; workspace: Workspace | null; expanded: boolean; saving: boolean;
 }) {
+  const navRef = useRef<HTMLElement>(null);
+  useEffect(() => { if (expanded) navRef.current?.querySelector<HTMLButtonElement>('[aria-current="page"]')?.focus(); }, [expanded]);
   const counts = { Projects: workspace?.projects.length, Snippets: workspace?.snippets.length, Notes: workspace?.notes.length };
   return <aside className={`sidebar ${expanded ? 'expanded' : ''}`} id="workspace-sidebar">
     <div className="brand"><span className="brand-mark"><Layers3 size={20} strokeWidth={2.15} /></span>
       <div><strong>NexaDesk</strong><span>Developer workspace</span></div>
     </div>
     <div className="nav-label">WORKSPACE</div>
-    <nav aria-label="Workspace">
+    <nav aria-label="Workspace" ref={navRef} onKeyDown={arrowFocus}>
       {navigation.map(({ label, icon: Icon }) => (
-        <button key={label} type="button" className={`nav-item ${view === label ? 'active' : ''}`} aria-current={view === label ? 'page' : undefined} onClick={() => go(label)}>
+        <button data-list-entry key={label} type="button" className={`nav-item ${view === label ? 'active' : ''}`} aria-current={view === label ? 'page' : undefined} onClick={() => go(label)}>
           <Icon size={17} /><span>{label}</span>{label in counts && <small>{counts[label as keyof typeof counts]}</small>}
         </button>
       ))}
     </nav>
     <div className="sidebar-footer">
       <span className="local-mark"><Command size={17} /></span>
-      <div><strong>Personal workspace</strong><span><i /> Local workspace</span></div>
+      <div><strong>Personal workspace</strong><span className={saving ? 'storage-saving' : undefined}><i /> {saving ? 'Saving locally…' : 'Local workspace'}</span></div>
     </div>
   </aside>;
 }
 
-export function Header({ view, dark, onTheme, onSearch, onNew, sidebarExpanded, onMenu }: {
+export function Header({ view, dark, onTheme, onSearch, onNew, ready, sidebarExpanded, onMenu }: {
   view: View; dark: boolean; onTheme: () => void; onSearch: () => void; onNew: () => void;
-  sidebarExpanded: boolean; onMenu: () => void;
+  ready: boolean; sidebarExpanded: boolean; onMenu: () => void;
 }) {
   const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
   const ViewIcon = navigation.find(({ label }) => label === view)?.icon ?? LayoutGrid;
@@ -45,9 +48,9 @@ export function Header({ view, dark, onTheme, onSearch, onNew, sidebarExpanded, 
       <ViewIcon size={17} /><span>{view}</span>
     </div>
     <div className="topbar-actions">
-      <button className="search-trigger" aria-label="Search workspace" onClick={onSearch}><Search size={16} /><span>Search workspace…</span><kbd>{isMac ? '⌘' : 'Ctrl'} K</kbd></button>
-      <button className="icon-button theme-button" onClick={onTheme} aria-label={dark ? 'Switch to light mode' : 'Switch to dark mode'} title={dark ? 'Switch to light mode' : 'Switch to dark mode'}>{dark ? <Sun size={18} /> : <Moon size={18} />}</button>
-      <button className="button primary" onClick={onNew}><Plus size={17} /><span>New Item</span></button>
+      <button className="search-trigger" disabled={!ready} aria-label="Search workspace" aria-keyshortcuts={isMac ? 'Meta+K' : 'Control+K'} onClick={onSearch}><Search size={16} /><span>Find anything…</span><kbd>{isMac ? '⌘' : 'Ctrl'} K</kbd></button>
+      <button className="icon-button theme-button" disabled={!ready} onClick={onTheme} aria-label={dark ? 'Switch to light mode' : 'Switch to dark mode'} title={dark ? 'Switch to light mode' : 'Switch to dark mode'}>{dark ? <Sun size={18} /> : <Moon size={18} />}</button>
+      <button className="button primary" disabled={!ready} onClick={onNew}><Plus size={17} /><span>New Item</span></button>
     </div>
   </header>;
 }
@@ -113,9 +116,18 @@ export function Modal({ title, children, onClose, className = '' }: {
 }
 
 export function Toast({ message, error }: { message: string; error: boolean }) {
-  return <div className={`toast ${error ? 'error' : ''}`} role={error ? 'alert' : 'status'}>
-    {error ? <Activity size={17} /> : <Check size={17} />}{message}
+  return <div className={`toast ${error ? 'error' : ''}`} role={error ? 'alert' : 'status'} aria-atomic="true">
+    <span className="toast-icon">{error ? <CircleAlert size={16} /> : <Check size={16} />}</span>{message}
   </div>;
+}
+
+export function Pager({ page, pages, onChange, label }: { page: number; pages: number; onChange: (page: number) => void; label: string }) {
+  if (pages < 2) return null;
+  return <nav className="pager" aria-label={label}>
+    <button className="icon-button" type="button" aria-label="Previous page" disabled={page === 0} onClick={() => onChange(page - 1)}><ChevronLeft size={16} /></button>
+    <span aria-live="polite">Page {page + 1} of {pages}</span>
+    <button className="icon-button" type="button" aria-label="Next page" disabled={page + 1 === pages} onClick={() => onChange(page + 1)}><ChevronRight size={16} /></button>
+  </nav>;
 }
 
 export function CopyButton({ label, onClick }: { label: string; onClick: () => void }) {

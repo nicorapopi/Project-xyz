@@ -1,6 +1,7 @@
 import { Activity, ArrowRight, ChevronRight, FileText, Folder, Plus, Terminal } from 'lucide-react';
 import { Empty, PanelHeader, ProjectIcon, StatusBadge, Tags } from './components';
 import { displayDate, updatedFirst, type Note, type Project, type Workspace } from './model';
+import { arrowFocus } from './useList';
 
 export function Overview({ workspace, onProjects, onActiveProjects, onSnippets, onNotes, onAdd, onProject, onNote }: {
   workspace: Workspace; onProjects: () => void; onActiveProjects: () => void; onSnippets: () => void; onNotes: () => void;
@@ -37,19 +38,19 @@ export function Overview({ workspace, onProjects, onActiveProjects, onSnippets, 
       </button>)}
     </section>
     <div className="overview-panels">
-      <section className="surface recent-panel">
+      <section className="surface recent-panel" onKeyDown={arrowFocus}>
         <PanelHeader title="Recent projects" icon={Folder} onView={onProjects} />
-        {workspace.projects.length ? updatedFirst(workspace.projects).slice(0, 4).map((project) => <button className="project-row" key={project.id} onClick={() => onProject(project)}>
+        {workspace.projects.length ? updatedFirst(workspace.projects).slice(0, 4).map((project) => <button data-list-entry className="project-row" key={project.id} onClick={() => onProject(project)}>
           <ProjectIcon id={project.id} />
           <div className="row-title"><strong>{project.title}</strong><Tags tags={project.tags} /></div>
           <StatusBadge status={project.status} /><ChevronRight className="row-chevron" size={16} />
         </button>) : <Empty title="No projects yet" text="Add a project to see it here." action={<button className="text-button" onClick={onAdd}>New project <ArrowRight size={14} /></button>} />}
       </section>
-      <section className="surface recent-panel">
+      <section className="surface recent-panel" onKeyDown={arrowFocus}>
         <PanelHeader title="Recent notes" icon={FileText} onView={onNotes} />
         {workspace.notes.length ? updatedFirst(workspace.notes).slice(0, 3).map((note) => {
           const project = workspace.projects.find((item) => item.id === note.projectId);
-          return <button className="note-row" key={note.id} onClick={() => onNote(note)}>
+          return <button data-list-entry className="note-row" key={note.id} onClick={() => onNote(note)}>
             <span className="item-icon neutral"><FileText size={17} /></span>
             <div className="row-title"><strong>{note.title}</strong><span className="row-subtitle">{[project?.title, note.topic].filter(Boolean).join(' · ') || 'General note'}</span></div>
             <time className="short-date" dateTime={note.updatedAt}>{displayDate(note.updatedAt)}</time>
