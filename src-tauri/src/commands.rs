@@ -107,7 +107,13 @@ pub async fn reveal_project_folder(app: AppHandle, project_id: String) -> Result
 }
 
 fn safe_web_url(input: &str) -> Result<Url, StoreError> {
-    if input.len() > 4096 || input.chars().any(char::is_control) {
+    let scheme = input.split_once("://").map(|(scheme, _)| scheme);
+    if input.len() > 4096
+        || input.chars().any(char::is_control)
+        || !scheme.is_some_and(|scheme| {
+            scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+        })
+    {
         return Err(StoreError::Blocked);
     }
     let url = Url::parse(input).map_err(|_| StoreError::Blocked)?;
@@ -158,6 +164,7 @@ mod tests {
     fn only_opens_web_links_without_credentials() {
         for input in [
             "file:///etc/passwd",
+            "http:example.com",
             "javascript:alert(1)",
             "https://user:pass@example.com",
             "https://exa\nmple.com",

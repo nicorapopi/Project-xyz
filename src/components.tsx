@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useRef, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useLayoutEffect, useRef, type ReactNode } from 'react';
 import { ArrowRight, AudioLines, Boxes, Braces, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, CodeXml, Command, Copy, FileText, Folder, FolderOpen, Layers3, LayoutGrid, Menu, Moon, Plus, Search, Settings2, Sun, Terminal, X, type LucideIcon } from 'lucide-react';
 import { statusClass, type Status, type View, type Workspace } from './model';
 import { arrowFocus } from './useList';
@@ -15,14 +15,26 @@ export function Sidebar({ view, go, workspace, expanded, saving }: {
   view: View; go: (view: View) => void; workspace: Workspace | null; expanded: boolean; saving: boolean;
 }) {
   const navRef = useRef<HTMLElement>(null);
-  useEffect(() => { if (expanded) navRef.current?.querySelector<HTMLButtonElement>('[aria-current="page"]')?.focus(); }, [expanded]);
+  useLayoutEffect(() => {
+    if (expanded) navRef.current?.querySelector<HTMLButtonElement>('[aria-current="page"]')?.focus({ preventScroll: true });
+  }, [expanded]);
   const counts = { Projects: workspace?.projects.length, Snippets: workspace?.snippets.length, Notes: workspace?.notes.length };
   return <aside className={`sidebar ${expanded ? 'expanded' : ''}`} id="workspace-sidebar">
     <div className="brand"><span className="brand-mark"><Layers3 size={20} strokeWidth={2.15} /></span>
       <div><strong>NexaDesk</strong><span>Developer workspace</span></div>
     </div>
     <div className="nav-label">WORKSPACE</div>
-    <nav aria-label="Workspace" ref={navRef} onKeyDown={arrowFocus}>
+    <nav aria-label="Workspace" ref={navRef} onKeyDown={(event) => {
+      if (expanded && event.key === 'Tab') {
+        const links = event.currentTarget.querySelectorAll<HTMLButtonElement>('button[data-list-entry]');
+        const first = links[0];
+        const last = links[links.length - 1];
+        if (event.shiftKey ? event.target === first : event.target === last) {
+          event.preventDefault();
+          (event.shiftKey ? last : first)?.focus();
+        }
+      } else arrowFocus(event);
+    }}>
       {navigation.map(({ label, icon: Icon }) => (
         <button data-list-entry key={label} type="button" className={`nav-item ${view === label ? 'active' : ''}`} aria-current={view === label ? 'page' : undefined} onClick={() => go(label)}>
           <Icon size={17} /><span>{label}</span>{label in counts && <small>{counts[label as keyof typeof counts]}</small>}
@@ -60,7 +72,7 @@ export function StatusBadge({ status }: { status: Status }) {
 }
 
 export function Tags({ tags }: { tags: string[] }) {
-  return <div className="tags">{tags.map((tag) => <span key={tag}>{tag}</span>)}</div>;
+  return <div className="tags">{[...new Set(tags)].map((tag) => <span key={tag}>{tag}</span>)}</div>;
 }
 
 const projectIcons = [Braces, AudioLines, CodeXml, Boxes];

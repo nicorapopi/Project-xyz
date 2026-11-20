@@ -92,7 +92,7 @@ export function Search({ workspace, onClose, onSelect, onNavigate, onCreate }: {
   return <Modal title="Search workspace" onClose={onClose} className="search-modal">
     <label className="filter-search palette-input"><SearchIcon size={18} />
       <input autoFocus role="combobox" aria-autocomplete="list" aria-expanded aria-controls={resultsId}
-        aria-activedescendant={active >= 0 ? optionId(active) : undefined} aria-label="Search projects, snippets, notes, and actions"
+        aria-activedescendant={active >= 0 && query === deferred ? optionId(active) : undefined} aria-label="Search projects, snippets, notes, and actions"
         placeholder="Search or jump to…" value={search} maxLength={240}
         onChange={(event) => { setSearch(event.target.value); setFocused(0); }}
         onKeyDown={handleKeys} />
@@ -100,7 +100,7 @@ export function Search({ workspace, onClose, onSelect, onNavigate, onCreate }: {
     <div className="palette-results" role="listbox" id={resultsId} aria-label="Search results" aria-busy={deferred !== query}>
       {choices.map((choice, position) => <div role="option" aria-selected={active === position}
         className={active === position ? 'palette-result focused' : 'palette-result'} id={optionId(position)} key={choice.key}
-        onMouseDown={(event) => event.preventDefault()} onClick={() => choose(choice)} onMouseMove={() => setFocused(position)}>
+        onMouseDown={(event) => event.preventDefault()} onClick={() => { if (query === deferred) choose(choice); }} onMouseMove={() => setFocused(position)}>
         <span className="item-icon neutral"><choice.icon size={16} /></span><strong>{choice.title}</strong><span className="result-kind">{choice.label}</span><ChevronRight size={15} />
       </div>)}
     </div>

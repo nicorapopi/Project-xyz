@@ -18,6 +18,11 @@ type Overlay =
   | { type: 'delete'; value: EditorValue };
 
 const media = window.matchMedia('(prefers-color-scheme: dark)');
+const compactViewport = window.matchMedia('(max-width: 840px)');
+
+function focusMenu() {
+  requestAnimationFrame(() => document.querySelector<HTMLButtonElement>('.mobile-menu')?.focus());
+}
 
 export function App() {
   const { state, mutate, reload } = useWorkspace();
@@ -38,6 +43,12 @@ export function App() {
     return () => media.removeEventListener('change', onChange);
   }, []);
 
+  useEffect(() => {
+    const resize = (event: MediaQueryListEvent) => { if (!event.matches) setSidebarExpanded(false); };
+    compactViewport.addEventListener('change', resize);
+    return () => compactViewport.removeEventListener('change', resize);
+  }, []);
+
   const dark = workspace?.theme === 'dark' || (workspace?.theme === 'system' && systemDark);
   useEffect(() => { document.documentElement.dataset.theme = dark ? 'dark' : 'light'; }, [dark]);
 
@@ -47,11 +58,14 @@ export function App() {
         event.preventDefault();
         setOverlay((previous) => previous?.type === 'search' ? null : previous ?? { type: 'search' });
       }
-      if (event.key === 'Escape') setSidebarExpanded(false);
+      if (sidebarExpanded && event.key === 'Escape') {
+        setSidebarExpanded(false);
+        focusMenu();
+      }
     }
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [ready]);
+  }, [ready, sidebarExpanded]);
 
   useEffect(() => () => window.clearTimeout(toastTimer.current), []);
 
@@ -62,6 +76,7 @@ export function App() {
   }
 
   function navigate(next: View, onlyActive = false) {
+    if (sidebarExpanded) requestAnimationFrame(() => document.getElementById('main')?.focus());
     setActiveOnly(onlyActive);
     setView(next);
     setSidebarExpanded(false);
@@ -126,7 +141,10 @@ export function App() {
   return <ToastContext.Provider value={toast}><div className="app-shell">
     <a className="skip-link" href="#main">Skip to workspace</a>
     <Sidebar view={view} go={navigate} workspace={workspace} expanded={sidebarExpanded} saving={state.phase === 'ready' && state.pending > 0} />
-    {sidebarExpanded && <button aria-label="Close navigation" className="sidebar-backdrop" onClick={() => setSidebarExpanded(false)} />}
+    {sidebarExpanded && <button aria-label="Close navigation" tabIndex={-1} className="sidebar-backdrop" onClick={() => {
+      setSidebarExpanded(false);
+      focusMenu();
+    }} />}
     <div className="app-body">
       <Header view={view} dark={dark} onTheme={() => workspace && changeTheme(dark ? 'light' : 'dark')}
         onSearch={() => workspace && setOverlay({ type: 'search' })} onNew={() => workspace && setOverlay({ type: 'new' })}

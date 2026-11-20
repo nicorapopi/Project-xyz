@@ -17,6 +17,7 @@ test('rejects unknown versions, fields and duplicate IDs', () => {
   invalid.projects.push(invalid.projects[0]);
   assert.throws(() => parseImport(JSON.stringify(invalid)));
   assert.throws(() => parseImport(JSON.stringify({ ...initialWorkspace, admin: true })));
+  assert.throws(() => parseImport(JSON.stringify(initialWorkspace).replace(/^\{/, '{"__proto__":{"role":"admin"},')));
   assert.equal(snapshotSchema.safeParse({ version: 2, revision: 0, workspace: initialWorkspace }).success, false);
 });
 

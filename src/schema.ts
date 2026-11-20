@@ -92,8 +92,8 @@ export function parseImport(raw: string): Workspace {
 
   const result = importSchema.safeParse(value);
   if (!result.success) {
-    const name = result.error.issues[0]?.path[0];
-    throw new ImportError(typeof name === 'string' && ['projects', 'notes', 'snippets'].includes(name)
+    const issue = result.error.issues[0];
+    throw new ImportError(issue?.code === 'custom' || issue?.path.length > 1
       ? 'An item is invalid. Check field lengths, identifiers, and absolute folder paths, then try again.'
       : 'The file does not match the NexaDesk workspace format.');
   }

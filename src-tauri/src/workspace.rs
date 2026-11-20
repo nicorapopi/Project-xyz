@@ -470,4 +470,20 @@ mod tests {
         assert!(!dir.path().join(CURRENT).exists());
         assert_eq!(fs::read(dir.path().join(LEGACY)).unwrap(), legacy);
     }
+
+    #[test]
+    fn preserves_existing_folder_values_and_validates_changed_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = br#"{"workspace.v1":{"projects":[{"id":"legacy","title":"Old project","updatedAt":"2026-01-01T00:00:00.000Z","description":"","tags":[],"status":"Testing","path":"old-relative-folder"}],"snippets":[],"notes":[],"theme":"light"}}"#;
+        fs::write(dir.path().join(LEGACY), legacy).unwrap();
+        let store = WorkspaceStore::new(dir.path().to_path_buf());
+        let mut workspace = store.read().unwrap().unwrap().workspace;
+        workspace.projects[0].title = "Updated project".into();
+        assert_eq!(store.write(workspace, 1), Ok(2));
+        let mut workspace = store.read().unwrap().unwrap().workspace;
+        assert_eq!(workspace.project_path("legacy"), Ok("old-relative-folder"));
+        workspace.projects[0].path = "../another-relative-folder".into();
+        assert_eq!(store.write(workspace, 2), Err(StoreError::Invalid));
+        assert_eq!(store.read().unwrap().unwrap().revision, 2);
+    }
 }
