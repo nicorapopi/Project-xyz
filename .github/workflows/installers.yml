@@ -1,0 +1,69 @@
+name: Desktop installers
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: installers-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bundle:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS universal
+            runner: macos-15
+            target: universal-apple-darwin
+            bundles: app,dmg
+            artifact: NexaDesk-macOS-universal
+            files: |
+              src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+              NexaDesk-macOS-app.zip
+          - name: Windows x64
+            runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            bundles: msi,nsis
+            artifact: NexaDesk-Windows-x64
+            files: |
+              src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+              src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install Rust
+        run: rustup update stable
+      - name: Install macOS targets
+        if: runner.os == 'macOS'
+        run: rustup target add --toolchain stable aarch64-apple-darwin x86_64-apple-darwin
+      - name: Install Windows target
+        if: runner.os == 'Windows'
+        run: rustup target add --toolchain stable x86_64-pc-windows-msvc
+      - run: npm ci
+      - name: Build desktop bundles
+        env:
+          RUSTUP_TOOLCHAIN: stable
+        run: npm run tauri build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+      - name: Archive macOS app bundle
+        if: runner.os == 'macOS'
+        run: ditto -c -k --keepParent src-tauri/target/universal-apple-darwin/release/bundle/macos/NexaDesk.app NexaDesk-macOS-app.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.files }}
+          if-no-files-found: error
