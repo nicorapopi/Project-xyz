@@ -11,18 +11,25 @@ src/
   Views.tsx        Projects, snippets, notes, and settings
   Editor.tsx       Item forms and delete confirmation
   Search.tsx       Keyboard-accessible workspace search
+  NoteMarkdown.tsx Lazy-loaded renderer for trusted Markdown elements
+  WorkspaceState.tsx Loading, recovery, and view error boundary
   components.tsx   Shared interface components
-  model.ts         Workspace types and validation
+  model.ts         Workspace types and display helpers
+  schema.ts        Version, import, editor, folder, and URL validation
   seed.ts          Sample projects, snippets, and notes
   storage.ts       Browser and desktop storage adapters
+  useWorkspace.ts  Optimistic updates and persistence recovery
+  useList.ts       Paging and keyboard navigation
+  workspaceActions.ts Item changes and collision-safe imports
   styles.css       Tailwind CSS, layouts, and color themes
 public/            Browser app icon
 src-tauri/
-  src/             Rust desktop entry point
+  src/             Rust window setup, scoped IPC, and atomic workspace store
   capabilities/    Permissions for native integrations
   icons/           Windows and macOS bundle icons
   tauri.conf.json  Window and bundle settings
 .github/workflows/ Desktop build and artifact upload
+tests/             Frontend validation and import regressions
 ```
 
 ## 1. Run the browser preview
@@ -52,7 +59,15 @@ The browser stores data per origin in `localStorage`. Keep using the same hostna
    npm run tauri dev
    ```
 
-Tauri starts Vite and opens the desktop window. It writes `workspace.json` after the first saved change. The default location is `~/Library/Application Support/com.nexadesk.workspace/` on macOS and `%APPDATA%\com.nexadesk.workspace\` on Windows. The desktop app and browser preview each have their own workspace.
+Tauri starts Vite and opens the desktop window. The default desktop data folder is `~/Library/Application Support/com.nexadesk.workspace/` on macOS and `%APPDATA%\com.nexadesk.workspace\` on Windows. The desktop app and browser preview each have their own workspace.
+
+## Workspace data and recovery
+
+- NexaDesk 0.2 writes `workspace-v2.json`. On the first load of a 0.1 workspace, it validates `workspace.json`, saves an exact `workspace-v1.backup.json`, then writes the new file. The original remains available. Browser migration keeps the original `nexadesk.workspace.v1` storage key and saves the versioned state to `nexadesk.workspace.v2`.
+- Desktop writes flush a temporary sibling file before replacing the current file. Revisions reject stale updates. If the saved file is unreadable, NexaDesk shows a retry screen and leaves the file intact.
+- To recover a desktop workspace, close NexaDesk and copy the app data folder somewhere safe. Move the unreadable `workspace-v2.json` out of that folder. To recover the 0.1 state, keep the intact `workspace.json` in place or copy a known-good v1 snapshot to that name before reopening. A known-good v2 copy can instead be returned to its original filename.
+- **Settings → Import JSON** accepts a NexaDesk v1 or v2 file up to 16 MB. Import adds records to the current workspace. Identical records are skipped. Differing records with the same ID receive new IDs, and imported notes follow their imported projects.
+- New folder paths must be absolute. The desktop app validates saved paths before opening Finder or Explorer. Windows device, network, and redirected folders can still be copied from older workspaces. Workspace files and backups contain readable JSON.
 
 ## 3. Build installers locally
 
@@ -88,9 +103,14 @@ Find the MSI and NSIS setup executable under `src-tauri/target/x86_64-pc-windows
 
 The workflow produces test builds without distribution signing credentials.
 
-## Frontend production check
+## Verification
 
 ```sh
+npm test
 npm run build
 npm run preview
 ```
+
+Use **Cmd/Ctrl+K** to find an exact title or run a workspace action. Use the arrow keys to move through results, **Enter** to open one, and **Esc** to close the palette. In the sidebar and note and project lists, arrow keys move focus between entries.
+
+The installer workflow also runs native tests for migration snapshots, corrupted-state recovery, stale writes, and validation. On a machine with the native prerequisites, run `cargo test --manifest-path src-tauri/Cargo.toml` to run them locally. To verify migration manually, launch against a copy of a 0.1 workspace and compare the v1 source and backup before making a change in 0.2.

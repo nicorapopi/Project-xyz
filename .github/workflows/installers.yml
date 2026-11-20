@@ -25,6 +25,7 @@ jobs:
           - name: macOS universal
             runner: macos-15
             target: universal-apple-darwin
+            test-target: aarch64-apple-darwin
             bundles: app,dmg
             artifact: NexaDesk-macOS-universal
             files: |
@@ -33,6 +34,7 @@ jobs:
           - name: Windows x64
             runner: windows-2022
             target: x86_64-pc-windows-msvc
+            test-target: x86_64-pc-windows-msvc
             bundles: msi,nsis
             artifact: NexaDesk-Windows-x64
             files: |
@@ -55,10 +57,15 @@ jobs:
         if: runner.os == 'Windows'
         run: rustup target add --toolchain stable x86_64-pc-windows-msvc
       - run: npm ci
+      - run: npm test
       - name: Build desktop bundles
         env:
           RUSTUP_TOOLCHAIN: stable
         run: npm run tauri build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+      - name: Test native persistence and validation
+        env:
+          RUSTUP_TOOLCHAIN: stable
+        run: cargo test --locked --release --manifest-path src-tauri/Cargo.toml --target ${{ matrix.test-target }}
       - name: Archive macOS app bundle
         if: runner.os == 'macOS'
         run: ditto -c -k --keepParent src-tauri/target/universal-apple-darwin/release/bundle/macos/NexaDesk.app NexaDesk-macOS-app.zip

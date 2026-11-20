@@ -1,38 +1,81 @@
-import { isTauri } from '@tauri-apps/api/core';
-import { isWorkspace, type Workspace } from './model';
+import { invoke, isTauri } from '@tauri-apps/api/core';
+import type { Workspace } from './model';
+import { MAX_WORKSPACE_BYTES, snapshotSchema, workspaceSchema, webUrl } from './schema';
 import { initialWorkspace } from './seed';
 
-const browserKey = 'nexadesk.workspace.v1';
-const nativeKey = 'workspace.v1';
+const browserLegacyKey = 'nexadesk.workspace.v1';
+export const browserKey = 'nexadesk.workspace.v2';
 export const desktop = isTauri();
 
-async function nativeStore() {
-  const { load } = await import('@tauri-apps/plugin-store');
-  return load('workspace.json', { autoSave: false, defaults: {} });
+export interface Snapshot {
+  revision: number;
+  workspace: Workspace;
 }
 
-let pendingWrite: Promise<void> = Promise.resolve();
-
-export async function readWorkspace(): Promise<Workspace> {
-  const raw = desktop ? await (await nativeStore()).get<unknown>(nativeKey) : localStorage.getItem(browserKey);
-  const data: unknown = typeof raw === 'string' && !desktop ? JSON.parse(raw) : raw;
-  if (data == null) return initialWorkspace;
-  if (!isWorkspace(data)) throw new Error('The saved workspace has an unsupported format.');
-  return data;
+export class StorageError extends Error {
+  constructor(readonly code: 'conflict' | 'corrupt' | 'blocked' | 'too-large' | 'invalid') {
+    super(code);
+  }
 }
 
-export function saveWorkspace(workspace: Workspace) {
-  const write = pendingWrite.catch(() => undefined).then(async () => {
-    if (desktop) {
-      const store = await nativeStore();
-      await store.set(nativeKey, workspace);
-      await store.save();
-    } else {
-      localStorage.setItem(browserKey, JSON.stringify(workspace));
-    }
+function checkSize(raw: string) {
+  if (raw.length > MAX_WORKSPACE_BYTES || new Blob([raw]).size > MAX_WORKSPACE_BYTES) throw new StorageError('too-large');
+}
+
+function parseJson(raw: string): unknown {
+  checkSize(raw);
+  try { return JSON.parse(raw); }
+  catch { throw new StorageError('corrupt'); }
+}
+
+function parseSnapshot(raw: unknown): Snapshot {
+  const parsed = snapshotSchema.safeParse(raw);
+  if (!parsed.success) throw new StorageError('corrupt');
+  return parsed.data;
+}
+
+async function native<T>(command: string, args?: Record<string, unknown>) {
+  try { return await invoke<T>(command, args); }
+  catch (error: unknown) {
+    if (error === 'conflict' || error === 'corrupt' || error === 'too-large' || error === 'invalid') throw new StorageError(error);
+    throw new StorageError('blocked');
+  }
+}
+
+function withBrowserLock<T>(operation: () => T): Promise<T> {
+  return navigator.locks ? navigator.locks.request(browserKey, operation) : Promise.resolve().then(operation);
+}
+
+function loadBrowser(): Snapshot {
+  const current = localStorage.getItem(browserKey);
+  if (current !== null) return parseSnapshot(parseJson(current));
+  const legacy = localStorage.getItem(browserLegacyKey);
+  if (legacy === null) return { revision: 0, workspace: initialWorkspace };
+  const data = workspaceSchema.safeParse(parseJson(legacy));
+  if (!data.success) throw new StorageError('corrupt');
+  // The legacy key is the exact pre-migration snapshot and remains untouched.
+  const migrated = { version: 2, revision: 1, workspace: data.data };
+  localStorage.setItem(browserKey, JSON.stringify(migrated));
+  return migrated;
+}
+
+export async function readWorkspace(): Promise<Snapshot> {
+  if (!desktop) return withBrowserLock(loadBrowser);
+  const raw = await native<unknown>('read_workspace');
+  return raw === null ? { revision: 0, workspace: initialWorkspace } : parseSnapshot(raw);
+}
+
+export async function saveWorkspace(workspace: Workspace, expectedRevision: number): Promise<number> {
+  if (desktop) return native<number>('write_workspace', { workspace, expectedRevision });
+  return withBrowserLock(() => {
+    const { revision } = loadBrowser();
+    if (revision !== expectedRevision) throw new StorageError('conflict');
+    const next = revision + 1;
+    const raw = JSON.stringify({ version: 2, revision: next, workspace });
+    checkSize(raw);
+    localStorage.setItem(browserKey, raw);
+    return next;
   });
-  pendingWrite = write;
-  return write;
 }
 
 export async function copyText(text: string) {
@@ -44,7 +87,11 @@ export async function copyText(text: string) {
   }
 }
 
-export async function revealFolder(path: string) {
-  const { revealItemInDir } = await import('@tauri-apps/plugin-opener');
-  await revealItemInDir(path);
+export function revealFolder(projectId: string) {
+  return native<void>('reveal_project_folder', { projectId });
+}
+
+export function openWebLink(url: string) {
+  const safe = webUrl(url);
+  return safe && desktop ? native<void>('open_web_link', { url: safe }) : Promise.reject(new StorageError('blocked'));
 }
