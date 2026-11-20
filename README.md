@@ -65,9 +65,19 @@ Tauri starts Vite and opens the desktop window. The default desktop data folder 
 
 - NexaDesk 0.2 writes `workspace-v2.json`. On the first load of a 0.1 workspace, it validates `workspace.json`, saves an exact `workspace-v1.backup.json`, then writes the new file. The original remains available. Browser migration keeps the original `nexadesk.workspace.v1` storage key and saves the versioned state to `nexadesk.workspace.v2`.
 - Desktop writes flush a temporary sibling file before replacing the current file. Revisions reject stale updates. If the saved file is unreadable, NexaDesk shows a retry screen and leaves the file intact.
-- To recover a desktop workspace, close NexaDesk and copy the app data folder somewhere safe. Move the unreadable `workspace-v2.json` out of that folder. To recover the 0.1 state, keep the intact `workspace.json` in place or copy a known-good v1 snapshot to that name before reopening. A known-good v2 copy can instead be returned to its original filename.
+- For an unencrypted desktop workspace, close NexaDesk and copy the app data folder somewhere safe. Move the unreadable `workspace-v2.json` out of that folder. To recover the 0.1 state, keep the intact `workspace.json` in place or copy a known-good v1 snapshot to that name before reopening. A known-good v2 copy can instead be returned to its original filename.
 - **Settings → Import JSON** accepts a NexaDesk v1 or v2 file up to 16 MB. Import adds records to the current workspace. Identical records are skipped. Differing records with the same ID receive new IDs, and imported notes follow their imported projects.
-- New folder paths must be absolute. The desktop app validates saved paths before opening Finder or Explorer. Windows device, network, and redirected folders can still be copied from older workspaces. Workspace files and backups contain readable JSON.
+- New folder paths must be absolute. The desktop app validates saved paths before opening Finder or Explorer. Windows device, network, and redirected folders can still be copied from older workspaces.
+
+### Desktop encryption
+
+1. Open **Settings → Workspace encryption → Enable encryption** and confirm.
+2. NexaDesk stores a random key in macOS Keychain or Windows Credential Manager under the current account. It replaces the live `workspace-v2.json` with an authenticated encrypted JSON envelope and keeps a rolling `workspace-encrypted.backup.json`. After a save, the rolling copy holds the previous committed revision.
+3. Keep the original OS credential when moving or restoring those files. An encrypted file alone cannot be opened on a fresh OS account. On macOS, the system may prompt for Keychain access.
+
+To restore an encrypted backup, close NexaDesk, copy the app data folder somewhere safe, and place a copy of the known-good encrypted file at `workspace-v2.json` in the app data folder. Reopen from the original account. If the key is unavailable, preserve the files and recover access to that credential first. Settings JSON import is for readable v1 and v2 files.
+
+Earlier plaintext migration files and exports remain on disk. Encryption covers the active workspace and its rolling backup. Browser preview storage remains readable local JSON.
 
 ## 3. Build installers locally
 
@@ -97,7 +107,7 @@ Find the MSI and NSIS setup executable under `src-tauri/target/x86_64-pc-windows
 
 ## 4. Download installers from GitHub Actions
 
-1. Open **Actions** in the GitHub repository and select **Desktop installers**. The workflow runs for pull requests into `main`, pushes to `main`, and `v*` tags. Once the workflow is on the default branch, it can also run on demand with **Run workflow**.
+1. Open **Actions** in the GitHub repository and select **Desktop installers**. The workflow runs for pull requests, pushes to `main`, and `v*` tags. Once the workflow is on the default branch, it can also run on demand with **Run workflow**.
 2. Open a successful run and scroll to **Artifacts**.
 3. Download **NexaDesk-macOS-universal** for the DMG and zipped APP or **NexaDesk-Windows-x64** for the MSI and EXE. Extract the downloaded archive before installing.
 

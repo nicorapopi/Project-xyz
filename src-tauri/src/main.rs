@@ -2,6 +2,7 @@
 
 mod commands;
 mod paths;
+mod vault;
 mod workspace;
 
 use std::sync::Mutex;
@@ -40,6 +41,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::read_workspace,
             commands::write_workspace,
+            commands::enable_workspace_encryption,
             commands::reveal_project_folder,
             commands::open_web_link,
         ])

@@ -3,6 +3,7 @@ fn main() {
         tauri_build::AppManifest::new().commands(&[
             "read_workspace",
             "write_workspace",
+            "enable_workspace_encryption",
             "reveal_project_folder",
             "open_web_link",
         ]),
