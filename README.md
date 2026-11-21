@@ -79,6 +79,14 @@ To restore an encrypted backup, close NexaDesk, copy the app data folder somewhe
 
 Earlier plaintext migration files and exports remain on disk. Encryption covers the active workspace and its rolling backup. Browser preview storage remains readable local JSON.
 
+### Portable encrypted backups
+
+1. In the desktop app, open **Settings → Portable backups → Export encrypted backup**. Enter and confirm a unique passphrase of at least 12 characters and choose a new `.nexabackup` filename.
+2. Copy the backup to the destination device. Store the passphrase separately. The portable file can be opened by NexaDesk 0.4 or later on another OS account.
+3. Choose **Restore backup** on the destination, enter the passphrase, and select the file. The restore replaces the workspace and keeps its existing local encryption setting. If a workspace already exists, NexaDesk first creates `workspace-before-restore-*.nexabackup` in its app data folder, encrypted with the passphrase supplied for the restore.
+
+The portable format uses Argon2id and authenticated encryption. An incorrect passphrase, a damaged backup, or a failed recovery copy leaves the current workspace intact.
+
 ## 3. Build installers locally
 
 Run `npm ci` first and complete the native prerequisites above.

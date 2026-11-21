@@ -74,7 +74,11 @@ pub struct Envelope {
     ciphertext: String,
 }
 
-pub fn seal(snapshot: &[u8], key: &VaultKey) -> Result<Vec<u8>, StoreError> {
+pub fn seal_payload(
+    plaintext: &[u8],
+    key: &VaultKey,
+    aad: &[u8],
+) -> Result<([u8; 12], Vec<u8>), StoreError> {
     let cipher =
         Aes256GcmSiv::new_from_slice(key.as_ref()).map_err(|_| StoreError::KeyUnavailable)?;
     let mut nonce = [0; 12];
@@ -83,11 +87,36 @@ pub fn seal(snapshot: &[u8], key: &VaultKey) -> Result<Vec<u8>, StoreError> {
         .encrypt(
             &Nonce::from(nonce),
             Payload {
-                msg: snapshot,
-                aad: AAD,
+                msg: plaintext,
+                aad,
             },
         )
         .map_err(|_| StoreError::Blocked)?;
+    Ok((nonce, ciphertext))
+}
+
+pub fn open_payload(
+    ciphertext: &[u8],
+    nonce: [u8; 12],
+    key: &VaultKey,
+    aad: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, StoreError> {
+    let cipher =
+        Aes256GcmSiv::new_from_slice(key.as_ref()).map_err(|_| StoreError::KeyUnavailable)?;
+    let decrypted = cipher
+        .decrypt(
+            &Nonce::from(nonce),
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
+        .map_err(|_| StoreError::Corrupt)?;
+    Ok(Zeroizing::new(decrypted))
+}
+
+pub fn seal(snapshot: &[u8], key: &VaultKey) -> Result<Vec<u8>, StoreError> {
+    let (nonce, ciphertext) = seal_payload(snapshot, key, AAD)?;
     let envelope = Envelope {
         version: 3,
         nonce,
@@ -107,16 +136,5 @@ pub fn open(
         .decode(envelope.ciphertext)
         .map_err(|_| StoreError::Corrupt)?;
     let key = keys.load()?.ok_or(StoreError::KeyUnavailable)?;
-    let cipher =
-        Aes256GcmSiv::new_from_slice(key.as_ref()).map_err(|_| StoreError::KeyUnavailable)?;
-    let decrypted = cipher
-        .decrypt(
-            &Nonce::from(envelope.nonce),
-            Payload {
-                msg: &bytes,
-                aad: AAD,
-            },
-        )
-        .map_err(|_| StoreError::Corrupt)?;
-    Ok((Zeroizing::new(decrypted), key))
+    Ok((open_payload(&bytes, envelope.nonce, &key, AAD)?, key))
 }

@@ -2,6 +2,7 @@
 
 mod commands;
 mod paths;
+mod portable;
 mod vault;
 mod workspace;
 
@@ -30,6 +31,7 @@ fn main() {
             }
         }))
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             app.manage(Mutex::new(WorkspaceStore::new(app.path().app_data_dir()?)));
             WebviewWindowBuilder::from_config(app, &app.config().app.windows[0])?
@@ -42,6 +44,8 @@ fn main() {
             commands::read_workspace,
             commands::write_workspace,
             commands::enable_workspace_encryption,
+            commands::export_portable_backup,
+            commands::restore_portable_backup,
             commands::reveal_project_folder,
             commands::open_web_link,
         ])

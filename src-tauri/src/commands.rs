@@ -1,5 +1,6 @@
 use crate::{
     paths::valid_stored_path,
+    portable,
     workspace::{StoreError, Workspace, WorkspaceRead, WorkspaceStore},
 };
 use std::{
@@ -7,6 +8,8 @@ use std::{
     sync::Mutex,
 };
 use tauri::{AppHandle, Manager, Url};
+use tauri_plugin_dialog::DialogExt;
+use zeroize::Zeroizing;
 
 pub type StoreState = Mutex<WorkspaceStore>;
 
@@ -38,6 +41,72 @@ pub async fn enable_workspace_encryption(
         store.enable_encryption(initial_workspace, expected_revision)
     })
     .await
+}
+
+async fn choose_backup(app: AppHandle, export: bool) -> Result<Option<PathBuf>, StoreError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let title = if export {
+            "Export encrypted NexaDesk backup"
+        } else {
+            "Select a NexaDesk backup to restore"
+        };
+        let mut dialog = app
+            .dialog()
+            .file()
+            .set_title(title)
+            .add_filter("NexaDesk backup", &[portable::EXTENSION]);
+        if let Some(window) = app.get_webview_window("main") {
+            dialog = dialog.set_parent(&window);
+        }
+        let chosen = if export {
+            dialog
+                .set_file_name(format!("NexaDesk.{}", portable::EXTENSION))
+                .blocking_save_file()
+        } else {
+            dialog.blocking_pick_file()
+        };
+        chosen
+            .map(|file| file.into_path().map_err(|_| StoreError::BackupInvalid))
+            .transpose()
+    })
+    .await
+    .map_err(|_| StoreError::Blocked)?
+}
+
+#[tauri::command]
+pub async fn export_portable_backup(
+    app: AppHandle,
+    passphrase: String,
+    initial_workspace: Workspace,
+) -> Result<bool, StoreError> {
+    let passphrase = Zeroizing::new(passphrase);
+    portable::validate_passphrase(&passphrase)?;
+    let Some(destination) = choose_backup(app.clone(), true).await? else {
+        return Ok(false);
+    };
+    with_store(app, move |store| {
+        store.export_portable(&destination, &passphrase, initial_workspace)
+    })
+    .await?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub async fn restore_portable_backup(
+    app: AppHandle,
+    passphrase: String,
+    expected_revision: u64,
+) -> Result<Option<WorkspaceRead>, StoreError> {
+    let passphrase = Zeroizing::new(passphrase);
+    portable::validate_passphrase(&passphrase)?;
+    let Some(source) = choose_backup(app.clone(), false).await? else {
+        return Ok(None);
+    };
+    with_store(app, move |store| {
+        store.restore_portable(&source, &passphrase, expected_revision)
+    })
+    .await
+    .map(Some)
 }
 
 #[tauri::command]

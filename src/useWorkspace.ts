@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Workspace } from './model';
-import { browserKey, desktop, enableWorkspaceEncryption, readWorkspace, saveWorkspace, StorageError, type Snapshot } from './storage';
+import { browserKey, desktop, enableWorkspaceEncryption, exportPortableBackup, readWorkspace, restorePortableBackup, saveWorkspace, StorageError, type Snapshot } from './storage';
 
 export type Mutation = (workspace: Workspace) => Workspace;
 
@@ -37,6 +37,10 @@ export function mutationMessage(error: unknown, fallback: string) {
   if (error instanceof StorageError && error.code === 'too-large') return 'This change would exceed the workspace size limit.';
   if (error instanceof StorageError && error.code === 'invalid') return 'Check the changed fields and linked project, then try again.';
   if (error instanceof StorageError && (error.code === 'key-unavailable' || error.code === 'recovery-required')) return loadMessage(error);
+  if (error instanceof StorageError && error.code === 'passphrase') return 'Use at least 12 characters and at most 256 UTF-8 bytes.';
+  if (error instanceof StorageError && error.code === 'backup-invalid') return 'Choose a valid NexaDesk portable backup (.nexabackup).';
+  if (error instanceof StorageError && error.code === 'backup-authentication') return 'The passphrase is incorrect or the backup is damaged.';
+  if (error instanceof StorageError && error.code === 'backup-exists') return 'Choose a new filename. The existing backup was preserved.';
   return fallback;
 }
 
@@ -143,5 +147,19 @@ export function useWorkspace() {
     encrypted: true,
   }));
 
-  return { state, mutate, reload, enableEncryption };
+  async function portableBackup(action: 'export' | 'restore', passphrase: string) {
+    let completed = false;
+    await enqueue((workspace) => workspace, async (workspace, previous) => {
+      if (action === 'export') {
+        completed = await exportPortableBackup(passphrase, workspace);
+        return previous;
+      }
+      const restored = await restorePortableBackup(passphrase, previous.revision);
+      completed = restored !== null;
+      return restored ?? previous;
+    });
+    return completed;
+  }
+
+  return { state, mutate, reload, enableEncryption, portableBackup };
 }

@@ -13,8 +13,14 @@ export interface Snapshot {
   encrypted: boolean;
 }
 
+const storageErrorCodes = [
+  'conflict', 'corrupt', 'blocked', 'too-large', 'invalid', 'key-unavailable', 'recovery-required',
+  'passphrase', 'backup-invalid', 'backup-authentication', 'backup-exists',
+] as const;
+type StorageErrorCode = typeof storageErrorCodes[number];
+
 export class StorageError extends Error {
-  constructor(readonly code: 'conflict' | 'corrupt' | 'blocked' | 'too-large' | 'invalid' | 'key-unavailable' | 'recovery-required') {
+  constructor(readonly code: StorageErrorCode) {
     super(code);
   }
 }
@@ -38,9 +44,7 @@ function parseSnapshot(raw: unknown): Omit<Snapshot, 'encrypted'> {
 async function native<T>(command: string, args?: Record<string, unknown>) {
   try { return await invoke<T>(command, args); }
   catch (error: unknown) {
-    if (error === 'conflict' || error === 'corrupt' || error === 'too-large' || error === 'invalid') throw new StorageError(error);
-    if (error === 'key-unavailable' || error === 'recovery-required') throw new StorageError(error);
-    throw new StorageError('blocked');
+    throw new StorageError(storageErrorCodes.find((code) => code === error) ?? 'blocked');
   }
 }
 
@@ -63,12 +67,24 @@ function loadBrowser(): Snapshot {
 
 export async function readWorkspace(): Promise<Snapshot> {
   if (!desktop) return withBrowserLock(loadBrowser);
-  const raw = await native<unknown>('read_workspace');
+  return parseDesktopSnapshot(await native<unknown>('read_workspace'));
+}
+
+function parseDesktopSnapshot(raw: unknown): Snapshot {
   if (!raw || typeof raw !== 'object' || !('encrypted' in raw) || typeof raw.encrypted !== 'boolean' || !('snapshot' in raw)) {
     throw new StorageError('corrupt');
   }
   if (raw.snapshot === null && !raw.encrypted) return { revision: 0, workspace: initialWorkspace, encrypted: false };
   return { ...parseSnapshot(raw.snapshot), encrypted: raw.encrypted };
+}
+
+export function exportPortableBackup(passphrase: string, initialWorkspace: Workspace) {
+  return native<boolean>('export_portable_backup', { passphrase, initialWorkspace });
+}
+
+export async function restorePortableBackup(passphrase: string, expectedRevision: number) {
+  const raw = await native<unknown>('restore_portable_backup', { passphrase, expectedRevision });
+  return raw === null ? null : parseDesktopSnapshot(raw);
 }
 
 export function enableWorkspaceEncryption(initialWorkspace: Workspace, expectedRevision: number) {

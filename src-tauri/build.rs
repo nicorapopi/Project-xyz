@@ -4,6 +4,8 @@ fn main() {
             "read_workspace",
             "write_workspace",
             "enable_workspace_encryption",
+            "export_portable_backup",
+            "restore_portable_backup",
             "reveal_project_folder",
             "open_web_link",
         ]),
