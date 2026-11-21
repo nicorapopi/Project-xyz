@@ -6,6 +6,9 @@
     "clipboard-manager:allow-write-text",
     "allow-read-workspace",
     "allow-write-workspace",
+    "allow-enable-workspace-encryption",
+    "allow-export-portable-backup",
+    "allow-restore-portable-backup",
     "allow-reveal-project-folder",
     "allow-open-web-link"
   ]

@@ -1,4 +1,6 @@
 use crate::paths::valid_stored_path;
+use crate::portable;
+use crate::vault::{self, KeyStore, OsKeyStore, VaultKey};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -8,12 +10,15 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tempfile::NamedTempFile;
+use zeroize::Zeroizing;
 
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_REVISION: u64 = (1 << 53) - 1;
 const CURRENT: &str = "workspace-v2.json";
 const LEGACY: &str = "workspace.json";
 const BACKUP: &str = "workspace-v1.backup.json";
+const ENCRYPTED_BACKUP: &str = "workspace-encrypted.backup.json";
+const MAX_DISK_BYTES: u64 = MAX_BYTES * 4 / 3 + 1024;
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -22,6 +27,12 @@ pub enum StoreError {
     Conflict,
     Corrupt,
     Invalid,
+    KeyUnavailable,
+    RecoveryRequired,
+    Passphrase,
+    BackupInvalid,
+    BackupAuthentication,
+    BackupExists,
     TooLarge,
 }
 
@@ -272,14 +283,44 @@ impl Workspace {
     }
 }
 
-pub struct WorkspaceStore(PathBuf);
+struct Sealed {
+    key: VaultKey,
+    bytes: Vec<u8>,
+}
+
+struct Stored {
+    snapshot: Snapshot,
+    sealed: Option<Sealed>,
+}
+
+#[derive(Serialize)]
+pub struct WorkspaceRead {
+    snapshot: Option<Snapshot>,
+    encrypted: bool,
+}
+
+pub struct WorkspaceStore(PathBuf, Box<dyn KeyStore>);
 
 impl WorkspaceStore {
     pub fn new(directory: PathBuf) -> Self {
-        Self(directory)
+        Self(directory, Box::new(OsKeyStore))
     }
 
     pub fn read(&self) -> Result<Option<Snapshot>> {
+        Ok(self.read_saved()?.map(|stored| stored.snapshot))
+    }
+
+    pub fn read_with_mode(&self) -> Result<WorkspaceRead> {
+        let stored = self.read_saved()?;
+        Ok(WorkspaceRead {
+            encrypted: stored
+                .as_ref()
+                .is_some_and(|stored| stored.sealed.is_some()),
+            snapshot: stored.map(|stored| stored.snapshot),
+        })
+    }
+
+    fn read_saved(&self) -> Result<Option<Stored>> {
         match fs::symlink_metadata(&self.0) {
             Ok(metadata) if !metadata.is_dir() || reparse(&metadata) => {
                 return Err(StoreError::Blocked)
@@ -289,13 +330,41 @@ impl WorkspaceStore {
             Err(_) => return Err(StoreError::Blocked),
         }
         let current = self.0.join(CURRENT);
-        if let Some(bytes) = read_bytes(&current)? {
-            let snapshot: Snapshot = from_json(&bytes)?;
+        if let Some(bytes) = read_limited(&current, MAX_DISK_BYTES)? {
+            let mut bytes = Zeroizing::new(bytes);
+            let (snapshot, sealed): (Snapshot, _) = match serde_json::from_slice(&bytes) {
+                Ok(snapshot) => {
+                    if regular_file_exists(&self.0.join(ENCRYPTED_BACKUP))? {
+                        return Err(StoreError::RecoveryRequired);
+                    }
+                    if bytes.len() as u64 > MAX_BYTES {
+                        return Err(StoreError::TooLarge);
+                    }
+                    (snapshot, None)
+                }
+                Err(_) => {
+                    let envelope = from_json(&bytes)?;
+                    let (plaintext, key) = vault::open(envelope, self.1.as_ref())?;
+                    if plaintext.len() as u64 > MAX_BYTES {
+                        return Err(StoreError::TooLarge);
+                    }
+                    (
+                        from_json(&plaintext)?,
+                        Some(Sealed {
+                            key,
+                            bytes: std::mem::take(&mut *bytes),
+                        }),
+                    )
+                }
+            };
             if snapshot.version != 2 || !(1..=MAX_REVISION).contains(&snapshot.revision) {
                 return Err(StoreError::Corrupt);
             }
             snapshot.workspace.validate()?;
-            return Ok(Some(snapshot));
+            return Ok(Some(Stored { snapshot, sealed }));
+        }
+        if regular_file_exists(&self.0.join(ENCRYPTED_BACKUP))? {
+            return Err(StoreError::RecoveryRequired);
         }
         let Some(bytes) = read_bytes(&self.0.join(LEGACY))? else {
             return Ok(None);
@@ -312,24 +381,147 @@ impl WorkspaceStore {
             workspace,
         };
         atomic_write(&current, &encode(&snapshot)?, false)?;
-        Ok(Some(snapshot))
+        Ok(Some(Stored {
+            snapshot,
+            sealed: None,
+        }))
     }
 
     pub fn write(&self, workspace: Workspace, expected_revision: u64) -> Result<u64> {
         workspace.validate().map_err(|_| StoreError::Invalid)?;
-        let current = self.read()?;
-        let revision = current.as_ref().map_or(0, |stored| stored.revision);
+        let current = self.read_saved()?;
+        let revision = current
+            .as_ref()
+            .map_or(0, |stored| stored.snapshot.revision);
         if revision != expected_revision || revision >= MAX_REVISION {
             return Err(StoreError::Conflict);
         }
-        workspace.validate_edits(current.as_ref().map(|stored| &stored.workspace))?;
+        workspace.validate_edits(current.as_ref().map(|stored| &stored.snapshot.workspace))?;
         let snapshot = Snapshot {
             version: 2,
             revision: revision + 1,
             workspace,
         };
-        atomic_write(&self.0.join(CURRENT), &encode(&snapshot)?, revision > 0)?;
+        self.commit_snapshot(&snapshot, current)?;
         Ok(snapshot.revision)
+    }
+
+    fn commit_snapshot(&self, snapshot: &Snapshot, current: Option<Stored>) -> Result<()> {
+        let plaintext = Zeroizing::new(encode(snapshot)?);
+        let current_path = self.0.join(CURRENT);
+        if let Some(sealed) = current.and_then(|stored| stored.sealed) {
+            let bytes = vault::seal(&plaintext, &sealed.key)?;
+            self.write_encrypted_backup(&sealed.bytes)?;
+            atomic_write(&current_path, &bytes, true)?;
+        } else {
+            atomic_write(&current_path, &plaintext, snapshot.revision > 1)?;
+        }
+        Ok(())
+    }
+
+    pub fn export_portable(
+        &self,
+        destination: &Path,
+        passphrase: &str,
+        initial_workspace: Workspace,
+    ) -> Result<()> {
+        validate_backup_path(destination)?;
+        if regular_file_exists(destination)? {
+            return Err(StoreError::BackupExists);
+        }
+        let workspace = self
+            .read()?
+            .map_or(initial_workspace, |snapshot| snapshot.workspace);
+        write_portable(destination, &workspace, passphrase)
+    }
+
+    pub fn restore_portable(
+        &self,
+        source: &Path,
+        passphrase: &str,
+        expected_revision: u64,
+    ) -> Result<WorkspaceRead> {
+        validate_backup_path(source)?;
+        let file = read_limited(source, MAX_BYTES + portable::OVERHEAD)?
+            .ok_or(StoreError::BackupInvalid)?;
+        let plaintext = portable::open(&file, passphrase)?;
+        let workspace: Workspace = from_json(&plaintext).map_err(|_| StoreError::BackupInvalid)?;
+        workspace
+            .validate()
+            .map_err(|_| StoreError::BackupInvalid)?;
+
+        let current = self.read_saved()?;
+        let revision = current
+            .as_ref()
+            .map_or(0, |stored| stored.snapshot.revision);
+        if revision != expected_revision || revision >= MAX_REVISION {
+            return Err(StoreError::Conflict);
+        }
+        let encrypted = current
+            .as_ref()
+            .is_some_and(|stored| stored.sealed.is_some());
+        if let Some(stored) = &current {
+            let time = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| StoreError::Blocked)?;
+            let recovery = self.0.join(format!(
+                "workspace-before-restore-r{revision}-{}.{}",
+                time.as_nanos(),
+                portable::EXTENSION
+            ));
+            write_portable(&recovery, &stored.snapshot.workspace, passphrase)?;
+        }
+        let snapshot = Snapshot {
+            version: 2,
+            revision: revision + 1,
+            workspace,
+        };
+        self.commit_snapshot(&snapshot, current)?;
+        Ok(WorkspaceRead {
+            snapshot: Some(snapshot),
+            encrypted,
+        })
+    }
+
+    pub fn enable_encryption(
+        &self,
+        initial_workspace: Workspace,
+        expected_revision: u64,
+    ) -> Result<u64> {
+        let current = self.read_saved()?;
+        let revision = current
+            .as_ref()
+            .map_or(0, |stored| stored.snapshot.revision);
+        if revision != expected_revision || revision >= MAX_REVISION {
+            return Err(StoreError::Conflict);
+        }
+        let workspace = match current {
+            Some(stored) if stored.sealed.is_some() => return Ok(revision),
+            Some(stored) => stored.snapshot.workspace,
+            None => {
+                initial_workspace
+                    .validate()
+                    .map_err(|_| StoreError::Invalid)?;
+                initial_workspace.validate_edits(None)?;
+                initial_workspace
+            }
+        };
+        let snapshot = Snapshot {
+            version: 2,
+            revision: revision + 1,
+            workspace,
+        };
+        let plaintext = Zeroizing::new(encode(&snapshot)?);
+        let key = vault::load_or_create_key(self.1.as_ref())?;
+        let bytes = vault::seal(&plaintext, &key)?;
+        self.write_encrypted_backup(&bytes)?;
+        atomic_write(&self.0.join(CURRENT), &bytes, revision > 0)?;
+        Ok(snapshot.revision)
+    }
+
+    fn write_encrypted_backup(&self, bytes: &[u8]) -> Result<()> {
+        let backup = self.0.join(ENCRYPTED_BACKUP);
+        atomic_write(&backup, bytes, regular_file_exists(&backup)?)
     }
 
     fn backup_legacy(&self, original: &[u8]) -> Result<()> {
@@ -353,6 +545,29 @@ impl WorkspaceStore {
     }
 }
 
+fn validate_backup_path(path: &Path) -> Result<()> {
+    if path.is_absolute()
+        && path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case(portable::EXTENSION))
+    {
+        Ok(())
+    } else {
+        Err(StoreError::BackupInvalid)
+    }
+}
+
+fn write_portable(destination: &Path, workspace: &Workspace, passphrase: &str) -> Result<()> {
+    workspace.validate().map_err(|_| StoreError::Invalid)?;
+    let plaintext = Zeroizing::new(serde_json::to_vec(workspace).map_err(|_| StoreError::Blocked)?);
+    if plaintext.len() as u64 > MAX_BYTES {
+        return Err(StoreError::TooLarge);
+    }
+    let bytes = portable::seal(&plaintext, passphrase)?;
+    atomic_write(destination, &bytes, false)
+}
+
 fn from_json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     serde_json::from_slice(bytes).map_err(|_| StoreError::Corrupt)
 }
@@ -366,20 +581,28 @@ fn encode(snapshot: &Snapshot) -> Result<Vec<u8>> {
 }
 
 fn read_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
+    read_limited(path, MAX_BYTES)
+}
+
+fn regular_file_exists(path: &Path) -> Result<bool> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) if !metadata.is_file() || reparse(&metadata) => {
-            return Err(StoreError::Blocked)
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(StoreError::Blocked),
+        Ok(metadata) if !metadata.is_file() || reparse(&metadata) => Err(StoreError::Blocked),
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(StoreError::Blocked),
+    }
+}
+
+fn read_limited(path: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
+    if !regular_file_exists(path)? {
+        return Ok(None);
     }
     let file = File::open(path).map_err(|_| StoreError::Blocked)?;
     let mut bytes = Vec::new();
-    file.take(MAX_BYTES + 1)
+    file.take(limit + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| StoreError::Blocked)?;
-    if bytes.len() as u64 > MAX_BYTES {
+    if bytes.len() as u64 > limit {
         return Err(StoreError::TooLarge);
     }
     Ok(Some(bytes))
@@ -422,8 +645,163 @@ fn atomic_write(path: &Path, bytes: &[u8], replace: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     const EMPTY: &[u8] = br#"{"projects":[],"snippets":[],"notes":[],"theme":"light"}"#;
+    const PRIVATE: &[u8] = br#"{"projects":[],"snippets":[{"id":"sample","title":"Private fixture","category":"General","content":"sample sensitive fixture content","updatedAt":"2026-01-01T00:00:00.000Z"}],"notes":[],"theme":"light"}"#;
+    const RECOVERY_PHRASE: &str = "multiple words for recovery";
+
+    #[derive(Clone, Default)]
+    struct TestKeys(Arc<Mutex<Option<VaultKey>>>);
+
+    impl KeyStore for TestKeys {
+        fn load(&self) -> Result<Option<VaultKey>> {
+            Ok(self.0.lock().unwrap().clone())
+        }
+
+        fn store(&self, key: &VaultKey) -> Result<()> {
+            *self.0.lock().unwrap() = Some(key.clone());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn portable_restore_across_stores_preserves_the_previous_encrypted_workspace() {
+        let origin = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let exported = origin.path().join("portable.nexabackup");
+        let original = WorkspaceStore::new(origin.path().into());
+        original
+            .export_portable(&exported, RECOVERY_PHRASE, from_json(PRIVATE).unwrap())
+            .unwrap();
+        let source_bytes = fs::read(&exported).unwrap();
+        assert!(
+            !String::from_utf8_lossy(&source_bytes).contains("sample sensitive fixture content")
+        );
+        assert_eq!(
+            original.export_portable(&exported, RECOVERY_PHRASE, from_json(EMPTY).unwrap()),
+            Err(StoreError::BackupExists)
+        );
+
+        let store = WorkspaceStore(target.path().into(), Box::<TestKeys>::default());
+        assert_eq!(store.enable_encryption(from_json(EMPTY).unwrap(), 0), Ok(1));
+        let old_live = fs::read(target.path().join(CURRENT)).unwrap();
+        assert!(matches!(
+            store.restore_portable(&exported, "incorrect test phrase", 1),
+            Err(StoreError::BackupAuthentication)
+        ));
+        assert!(matches!(
+            store.restore_portable(&exported, RECOVERY_PHRASE, 0),
+            Err(StoreError::Conflict)
+        ));
+        assert_eq!(fs::read(target.path().join(CURRENT)).unwrap(), old_live);
+        let result = store
+            .restore_portable(&exported, RECOVERY_PHRASE, 1)
+            .unwrap();
+        assert!(result.encrypted);
+        assert_eq!(result.snapshot.unwrap().revision, 2);
+        assert_eq!(
+            store.read().unwrap().unwrap().workspace.snippets[0].title,
+            "Private fixture"
+        );
+        assert_eq!(
+            fs::read(target.path().join(ENCRYPTED_BACKUP)).unwrap(),
+            old_live
+        );
+        let recovery = fs::read_dir(target.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("workspace-before-restore-r1-")
+            })
+            .unwrap();
+        let bytes = fs::read(&recovery.path()).unwrap();
+        let opened = portable::open(&bytes, RECOVERY_PHRASE).unwrap();
+        let before: Workspace = from_json(&opened).unwrap();
+        assert!(before.snippets.is_empty());
+        assert_eq!(fs::read(exported).unwrap(), source_bytes);
+    }
+
+    #[test]
+    fn encrypts_live_data_and_rotates_the_previous_encrypted_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = TestKeys::default();
+        let store = WorkspaceStore(dir.path().into(), Box::new(keys.clone()));
+        let active_path = dir.path().join(CURRENT);
+        assert_eq!(store.write(from_json(PRIVATE).unwrap(), 0), Ok(1));
+        assert_eq!(
+            store.enable_encryption(from_json(EMPTY).unwrap(), 0),
+            Err(StoreError::Conflict)
+        );
+        assert!(keys.load().unwrap().is_none());
+        assert_eq!(store.enable_encryption(from_json(EMPTY).unwrap(), 1), Ok(2));
+        let encrypted = fs::read(&active_path).unwrap();
+        assert!(!String::from_utf8_lossy(&encrypted).contains("sample sensitive fixture content"));
+        assert_eq!(
+            fs::read(dir.path().join(ENCRYPTED_BACKUP)).unwrap(),
+            encrypted
+        );
+
+        let reopened = WorkspaceStore(dir.path().into(), Box::new(keys));
+        let snapshot = reopened.read().unwrap().unwrap();
+        assert_eq!(snapshot.workspace.snippets[0].title, "Private fixture");
+        assert_eq!(reopened.write(snapshot.workspace, 2), Ok(3));
+        assert_ne!(fs::read(&active_path).unwrap(), encrypted);
+        assert_eq!(
+            fs::read(dir.path().join(ENCRYPTED_BACKUP)).unwrap(),
+            encrypted
+        );
+        fs::write(active_path, encrypted).unwrap();
+        assert_eq!(reopened.read().unwrap().unwrap().revision, 2);
+    }
+
+    #[test]
+    fn fails_closed_for_a_missing_key_or_tampered_ciphertext() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = TestKeys::default();
+        let store = WorkspaceStore(dir.path().into(), Box::new(keys.clone()));
+        assert_eq!(
+            store.enable_encryption(from_json(PRIVATE).unwrap(), 0),
+            Ok(1)
+        );
+        let path = dir.path().join(CURRENT);
+        let original = fs::read(&path).unwrap();
+        let key = keys.0.lock().unwrap().take().unwrap();
+        assert!(matches!(store.read(), Err(StoreError::KeyUnavailable)));
+        assert_eq!(
+            store.write(from_json(EMPTY).unwrap(), 1),
+            Err(StoreError::KeyUnavailable)
+        );
+        assert!(keys.load().unwrap().is_none());
+        assert_eq!(fs::read(&path).unwrap(), original);
+
+        keys.store(&key).unwrap();
+        let mut envelope: serde_json::Value = from_json(&original).unwrap();
+        envelope["nonce"][0] = ((envelope["nonce"][0].as_u64().unwrap() + 1) % 256).into();
+        fs::write(&path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+        assert!(matches!(store.read(), Err(StoreError::Corrupt)));
+        fs::remove_file(&path).unwrap();
+        assert!(matches!(store.read(), Err(StoreError::RecoveryRequired)));
+        assert!(dir.path().join(ENCRYPTED_BACKUP).exists());
+    }
+
+    #[test]
+    fn keeps_saved_data_when_creating_the_encrypted_backup_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = WorkspaceStore(dir.path().into(), Box::<TestKeys>::default());
+        assert_eq!(store.write(from_json(PRIVATE).unwrap(), 0), Ok(1));
+        let path = dir.path().join(CURRENT);
+        let original = fs::read(&path).unwrap();
+        fs::create_dir(dir.path().join(ENCRYPTED_BACKUP)).unwrap();
+        assert_eq!(
+            store.enable_encryption(from_json(EMPTY).unwrap(), 1),
+            Err(StoreError::Blocked)
+        );
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
 
     #[test]
     fn migration_preserves_exact_source_and_keeps_a_snapshot() {

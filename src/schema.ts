@@ -80,6 +80,7 @@ export function parseImport(raw: string): Workspace {
   catch { throw new ImportError('Choose a valid NexaDesk JSON file.'); }
 
   if (value && typeof value === 'object' && 'version' in value) {
+    if (value.version === 3 && 'ciphertext' in value) throw new ImportError('Restore encrypted backups through the desktop app data folder on the original OS account.');
     if (value.version !== 2 || !('workspace' in value)) throw new ImportError('This workspace file uses an unsupported version.');
     const envelope = snapshotSchema.safeParse(value);
     if (!envelope.success) throw new ImportError('The workspace file is damaged or has an unsupported format.');
